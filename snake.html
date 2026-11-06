@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="UTF-8">
+<title>Snake – Premium Edition</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* ==== CSS VARIABLES – light / dark ==== */
+:root {
+  --bg-light: #f5f5f7;
+  --bg-dark: #1e1e1e;
+  --grid-light: #e0e0e0;
+  --grid-dark: #2c2c2c;
+  --snake-head: #ff3b30;   /* Apple red */
+  --snake-body: #ff9500;   /* Microsoft orange */
+  --food: #34c759;         /* Google green */
+  --text: #111;
+  --text-inverse: #eee;
+  --accent: #007aff;       /* iOS blue */
+  --font: -apple-system, BlinkMacSystemFont,
+         "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+[data-theme="dark"] {
+  --bg: var(--bg-dark);
+  --grid: var(--grid-dark);
+  --text: var(--text-inverse);
+}
+[data-theme="light"] {
+  --bg: var(--bg-light);
+  --grid: var(--grid-light);
+  --text: var(--text);
+}
+[data-theme="auto"] {
+  /* auto will be set by script based on prefers-color-scheme */
+}
+
+/* ==== GLOBAL ==== */
+html, body {
+  margin:0; padding:0; height:100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  display:flex; align-items:center; justify-content:center;
+}
+#game-container {
+  position:relative;
+  width: 100vmin;
+  max-width: 600px;
+  aspect-ratio: 1;
+}
+canvas {
+  width:100%; height:100%;
+  background:#000;
+  border-radius:12px;
+  box-shadow:0 8px 20px rgba(0,0,0,0.15);
+}
+#ui {
+  position:absolute; inset:0;
+  display:flex; flex-direction:column;
+  justify-content:space-between;
+  pointer-events:none;
+  padding:0.8rem;
+}
+#score, #highscore {
+  font-size:1rem; font-weight:600;
+}
+#controls {
+  display:flex; gap:0.5rem; justify-content:center;
+}
+button {
+  background:var(--accent);
+  border:none; border-radius:6px;
+  color:#fff; font-weight:600;
+  padding:0.4rem 0.8rem;
+  cursor:pointer;
+  pointer-events:auto;
+  transition:background .2s, transform .1s;
+}
+button:hover { background:#0051c2; }
+button:active { transform:scale(0.96); }
+button#pause { background:#ff9500; }
+button#restart { background:#34c759; }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="game"></canvas>
+  <div id="ui">
+    <div id="top">
+      <div id="score">Score: 0</div>
+      <div id="highscore">Best: 0</div>
+    </div>
+    <div id="controls">
+      <button id="pause">Pause</button>
+      <button id="restart">Restart</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* -------------------------------------------------
+   Utility: Detect system theme and apply CSS variable
+------------------------------------------------- */
+(() => {
+  const setTheme = (theme) => document.documentElement.dataset.theme = theme;
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+  const update = () => setTheme(prefersDark.matches ? 'dark' : 'light');
+  update();
+  prefersDark.addEventListener('change', update);
+})();
+
+/* -------------------------------------------------
+   Game constants
+------------------------------------------------- */
+const CONFIG = {
+  cols: 20,
+  rows: 20,
+  cellSize: 0, // computed later
+  fps: 12,
+  colors: {
+    snakeHead: getComputedStyle(document.documentElement).getPropertyValue('--snake-head').trim(),
+    snakeBody: getComputedStyle(document.documentElement).getPropertyValue('--snake-body').trim(),
+    food: getComputedStyle(document.documentElement).getPropertyValue('--food').trim(),
+    grid: getComputedStyle(document.documentElement).getPropertyValue('--grid').trim()
+  }
+};
+
+/* -------------------------------------------------
+   Main Snake class
+------------------------------------------------- */
+class SnakeGame {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.reset();
+    this.bindEvents();
+    this.lastRender = 0;
+    requestAnimationFrame(this.loop.bind(this));
+  }
+
+  reset() {
+    this.grid = { w: CONFIG.cols, h: CONFIG.rows };
+    this.snake = [{ x: 9, y: 9 }]; // start in center
+    this.direction = { x: 0, y: -1 }; // moving up
+    this.nextDirection = this.direction;
+    this.placeFood();
+    this.score = 0;
+    this.gameOver = false;
+    this.paused = false;
+    this.updateScoreUI();
+  }
+
+  placeFood() {
+    const occupied = new Set(this.snake.map(p => `${p.x},${p.y}`));
+    let x, y;
+    do {
+      x = Math.floor(Math.random() * this.grid.w);
+      y = Math.floor(Math.random() * this.grid.h);
+    } while (occupied.has(`${x},${y}`));
+    this.food = { x, y };
+  }
+
+  bindEvents() {
+    // Keyboard
+    window.addEventListener('keydown', e => {
+      if (this.gameOver) return;
+      const key = e.key;
+      const dir = this.direction;
+      if (['ArrowUp','w','W'].includes(key) && dir.y !== 1) this.nextDirection = {x:0, y:-1};
+      else if (['ArrowDown','s','S'].includes(key) && dir.y !== -1) this.nextDirection = {x:0, y:1};
+      else if (['ArrowLeft','a','A'].includes(key) && dir.x !== 1) this.nextDirection = {x:-1, y:0};
+      else if (['ArrowRight','d','D'].includes(key) && dir.x !== -1) this.nextDirection = {x:1, y:0};
+      else if (key === ' ') this.togglePause();
+    });
+
+    // Touch – swipe detection
+    let touchStart = null;
+    this.canvas.addEventListener('touchstart', e => {
+      if (e.touches.length === 1) touchStart = e.touches[0];
+    });
+    this.canvas.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
+    this.canvas.addEventListener('touchend', e => {
+      if (!touchStart) return;
+      const touchEnd = e.changedTouches[0];
+      const dx = touchEnd.clientX - touchStart.clientX;
+      const dy = touchEnd.clientY - touchStart.clientY;
+      const absX = Math.abs(dx), absY = Math.abs(dy);
+      if (Math.max(absX, absY) < 30) return; // ignore tiny gestures
+      if (absX > absY) {
+        // horizontal swipe
+        if (dx > 0 && this.direction.x !== -1) this.nextDirection = {x:1, y:0};
+        else if (dx < 0 && this.direction.x !== 1) this.nextDirection = {x:-1, y:0};
+      } else {
+        // vertical swipe
+        if (dy > 0 && this.direction.y !== -1) this.nextDirection = {x:0, y:1};
+        else if (dy < 0 && this.direction.y !== 1) this.nextDirection = {x:0, y:-1};
+      }
+      touchStart = null;
+    });
+
+    // UI buttons
+    document.getElementById('pause').addEventListener('click', () => this.togglePause());
+    document.getElementById('restart').addEventListener('click', () => this.restart());
+  }
+
+  togglePause() {
+    if (this.gameOver) return;
+    this.paused = !this.paused;
+    document.getElementById('pause').textContent = this.paused ? 'Resume' : 'Pause';
+  }
+
+  restart() {
+    this.reset();
+    document.getElementById('pause').textContent = 'Pause';
+  }
+
+  updateScoreUI() {
+    const scoreEl = document.getElementById('score');
+    const bestEl = document.getElementById('highscore');
+    scoreEl.textContent = `Score: ${this.score}`;
+    const best = localStorage.getItem('snake-best') || 0;
+    if (this.score > best) localStorage.setItem('snake-best', this.score);
+    bestEl.textContent = `Best: ${Math.max(best, this.score)}`;
+  }
+
+  step() {
+    if (this.gameOver || this.paused) return;
+
+    // Apply pending direction
+    this.direction = this.nextDirection;
+
+    // New head position
+    const head = { x: this.snake[0].x + this.direction.x,
+                   y: this.snake[0].y + this.direction.y };
+
+    // Wall collision (wrap‑around optional – here we *kill* on wall)
+    if (head.x < 0 || head.x >= this.grid.w ||
+        head.y < 0 || head.y >= this.grid.h) {
+      this.gameOver = true;
+      this.showGameOver();
+      return;
+    }
+
+    // Self‑collision
+    if (this.snake.some(p => p.x === head.x && p.y === head.y)) {
+      this.gameOver = true;
+      this.showGameOver();
+      return;
+    }
+
+    // Add new head
+    this.snake.unshift(head);
+
+    // Eat food?
+    if (head.x === this.food.x && head.y === this.food.y) {
+      this.score++;
+      this.updateScoreUI();
+      this.placeFood();
+      // optional: play sound
+    } else {
+      // Remove tail
+      this.snake.pop();
+    }
+  }
+
+  showGameOver() {
+    const ctx = this.ctx;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.fillStyle = '#fff';
+    ctx.font = `${Math.round(this.canvas.width * 0.08)}px var(--font)`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Game Over', this.canvas.width / 2, this.canvas.height * 0.45);
+    ctx.font = `${Math.round(this.canvas.width * 0.045)}px var(--font)`;
+    ctx.fillText('Tap “Restart” or press any arrow key', this.canvas.width / 2, this.canvas.height * 0.55);
+  }
+
+  draw() {
+    const ctx = this.ctx;
+    const { w, h } = this.grid;
+    const size = Math.min(this.canvas.width / w, this.canvas.height / h);
+    CONFIG.cellSize = size;
+
+    // Clear background
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+    // Draw grid (optional subtle lines)
+    ctx.strokeStyle = CONFIG.colors.grid;
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= w; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * size, 0);
+      ctx.lineTo(i * size, h * size);
+      ctx.stroke();
+    }
+    for (let j = 0; j <= h; j++) {
+      ctx.beginPath();
+      ctx.moveTo(0, j * size);
+      ctx.lineTo(w * size, j * size);
+      ctx.stroke();
+    }
+
+    // Draw food
+    ctx.fillStyle = CONFIG.colors.food;
+    ctx.fillRect(this.food.x * size, this.food.y * size, size, size);
+
+    // Draw snake
+    this.snake.forEach((segment, idx) => {
+      ctx.fillStyle = idx === 0 ? CONFIG.colors.snakeHead : CONFIG.colors.snakeBody;
+      ctx.fillRect(segment.x * size, segment.y * size, size, size);
+    });
+  }
+
+  loop(timestamp) {
+    const delta = timestamp - this.lastRender;
+    if (delta > 1000 / CONFIG.fps) {
+      this.step();
+      this.draw();
+      this.lastRender = timestamp;
+    }
+    requestAnimationFrame(this.loop.bind(this));
+  }
+}
+
+/* -------------------------------------------------
+   Bootstrap
+------------------------------------------------- */
+window.addEventListener('load', () => {
+  const canvas = document.getElementById('game');
+  // Resize canvas to fit container while preserving aspect ratio
+  const resize = () => {
+    const container = document.getElementById('game-container');
+    const rect = container.getBoundingClientRect();
+    canvas.width = rect.width * window.devicePixelRatio;
+    canvas.height = rect.height * window.devicePixelRatio;
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  };
+  resize();
+  window.addEventListener('resize', resize);
+  new SnakeGame(canvas);
+});
+</script>
+</body>
+</html>
